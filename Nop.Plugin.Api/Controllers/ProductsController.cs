@@ -30,6 +30,7 @@ using Nop.Services.Media;
 using Nop.Services.Security;
 using Nop.Services.Seo;
 using Nop.Services.Stores;
+using Nop.Plugin.Api.Helpers;
 
 namespace Nop.Plugin.Api.Controllers
 {
@@ -43,6 +44,7 @@ namespace Nop.Plugin.Api.Controllers
         private readonly IManufacturerService _manufacturerService;
         private readonly IFactory<Product> _factory;
         private readonly IProductTagService _productTagService;
+        private readonly IDatabaseHelperService _databaseHelperService;
 
         public ProductsController(IProductApiService productApiService,
                                   IJsonFieldsSerializer jsonFieldsSerializer,
@@ -58,7 +60,8 @@ namespace Nop.Plugin.Api.Controllers
                                   IDiscountService discountService,
                                   IPictureService pictureService,
                                   IManufacturerService manufacturerService,
-                                  IProductTagService productTagService) : base(jsonFieldsSerializer, aclService, customerService, storeMappingService, storeService, discountService, customerActivityService, localizationService)
+                                  IProductTagService productTagService,
+                                  IDatabaseHelperService databaseHelperService) : base(jsonFieldsSerializer, aclService, customerService, storeMappingService, storeService, discountService, customerActivityService, localizationService)
         {
             _productApiService = productApiService;
             _factory = factory;
@@ -67,6 +70,7 @@ namespace Nop.Plugin.Api.Controllers
             _productTagService = productTagService;
             _urlRecordService = urlRecordService;
             _productService = productService;
+            _databaseHelperService = databaseHelperService;
         }
 
         /// <summary>
@@ -221,6 +225,65 @@ namespace Nop.Plugin.Api.Controllers
             var json = _jsonFieldsSerializer.Serialize(productsRootObject, string.Empty);
 
             return new RawJsonActionResult(json);
+        }
+
+        [HttpPost]
+        public IHttpActionResult CreateProducts(ProductsMultipleRootObjectDto productRoot)
+        {
+            // Here we display the errors if the validation has failed at some point.
+            if (!ModelState.IsValid)
+            {
+                return Error();
+            }
+
+            var mapper = new MappingHelper();
+
+            var products = new List<Product>();
+
+            foreach (var productDelta in productRoot.Products)
+            {
+                var product = _factory.Initialize();
+                mapper.Merge(productDelta, product);
+
+                var now = DateTime.UtcNow;
+                product.CreatedOnUtc = now;
+                product.UpdatedOnUtc = now;
+
+                products.Add(product);
+            }
+
+            _databaseHelperService.BulkInsert(products);
+
+
+            var hydratedProductDtos = products.Select(x => x.ToDto());
+
+            foreach(var productDelta in hydratedProductDtos)
+            {
+                var product = products.FirstOrDefault(x => x.Id == Convert.ToInt32(productDelta.Id));
+
+                UpdateProductPictures(product, productDelta.Images);
+
+                UpdateProductTags(product, productDelta.Tags);
+
+                UpdateProductManufacturers(product, productDelta.ManufacturerIds);
+
+                //search engine name
+                var seName = product.ValidateSeName(productDelta.SeName, product.Name, true);
+                _urlRecordService.SaveSlug(product, seName, 0);
+
+                UpdateAclRoles(product, productDelta.RoleIds);
+
+                UpdateDiscountMappings(product, productDelta.DiscountIds);
+
+                UpdateStoreMappings(product, productDelta.StoreIds);
+
+                _productService.UpdateProduct(product);
+
+                _customerActivityService.InsertActivity("AddNewProduct",
+                    _localizationService.GetResource("ActivityLog.AddNewProduct"), product.Name);
+            }
+
+            return Ok();
         }
 
         [HttpPut]
